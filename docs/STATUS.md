@@ -41,23 +41,34 @@ Initializing recomp heap at offset 0x01000000 with size 0x1F000000
 * The game uses a custom VFS: `.rom` blobs (models, textures, sounds) are
   stored in the cart and decompressed by the game's own code at runtime, so
   the recompiler cannot resolve the game's switch tables statically.
+* The boot section (`0x400..0x1000`) is the IPL3/CRT0 area. Several of its
+  functions call into the IPL3 boot code that the PIF normally copies to
+  physical `0x400000` (the `0x84xxxxxx` call pattern) and probe the cart's
+  memory map. They cannot be recompiled as-is and are stubbed, but the game
+  *calls* into that area, so the boundaries there need to be reconstructed
+  (Ghidra split the merged functions) and the probes need native
+  reimplementations.
 
 ## Open problems / next steps
 
-1. **Game init crash** (`func_8006be10`): the init path allocates the heaps
-   and calls into the engine; the crash is a store through a bad pointer.
-   Most likely the custom VFS has not loaded the data blobs yet (the loader
-   lives in the same init path), or a stubbed function is needed here.
-2. **RSP microcode**: the game uploads its own RSP microcode to IMEM and
+1. **Boot section (`0x400..0x1000`) reconstruction.** The function boundaries
+   there are wrong (Ghidra split functions that the compiler merged) and the
+   four functions that call the IPL3 boot code are stubbed. The game's init
+   calls into this area, so the stubbed allocator is what makes the game
+   crash with a null pointer.
+2. **Game init crash** (`func_8006be10`): a store through a null pointer,
+   i.e. the game asked the (stubbed) allocator for memory and got nothing.
+   Fixing (1) should fix this.
+3. **RSP microcode**: the game uploads its own RSP microcode to IMEM and
    renders through it. The runtime needs a microcode implementation:
    either recompile the microcode with `RSPRecomp` (upstream Zelda64Recomp
    does this) or write a generic RSP interpreter. The runtime already
    contains the vector unit (`librecomp/rsp_vu.hpp`); the scalar/control part
    and the SP register emulation are missing. The game also writes the SP
    registers directly (`0xA4040000`), which the runtime does not emulate yet.
-3. **Stubbed functions** (434) need to be reimplemented in C++ for correct
+4. **Stubbed functions** (434) need to be reimplemented in C++ for correct
    behaviour.
-4. Windows build: the CMake setup targets Windows + Linux; only Linux has
+5. Windows build: the CMake setup targets Windows + Linux; only Linux has
    been built here.
 
 ## Layout
