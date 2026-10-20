@@ -3,14 +3,20 @@
 Static recompilation of *Mace: The Dark Age* (N64, USA) using N64Recomp +
 the N64 modern runtime (librecomp / ultramodern) with the RT64 renderer.
 
-## Status: boots up to the game's own init, then crashes in engine code
+## Status: the game boots and runs, but the screen stays black
 
 ```
-$ ./build/mace-recomp "roms/Mace - The Dark Age (USA).z64"
-Device Name: NVIDIA GeForce RTX 3060        <- RT64/Vulkan initialises
-Initializing recomp heap at offset 0x01000000 with size 0x1F000000
--> crash in func_8006be10 (called from the game init at 0x8006CB64)
+$ MACE_ENTRY=0x80000400 ./build/mace-recomp "roms/Mace - The Dark Age (USA).z64"
+mace: starting at 0x80000400
+Device Name: NVIDIA GeForce RTX 3060      <- RT64 / Vulkan comes up
+Initializing recomp heap at offset 0x01000000 with size 0x3F000000
 ```
+
+The cart's boot code runs (it is recompiled and its IPL3 calls are stubbed)
+and the game does not crash, but nothing is displayed: the game's boot code
+drives the PI/VI/EXI hardware registers directly and the recomp runtime has
+no memory mapped I/O, so the game waits forever for a cart DMA that never
+happens.
 
 ## What works
 
@@ -24,8 +30,9 @@ Initializing recomp heap at offset 0x01000000 with size 0x1F000000
   data that is not statically resolvable).
 * Runtime: SDL window, RT64 (Vulkan) renderer, SDL audio, keyboard/gamepad
   input, `recomp::start()` wiring, ROM selection/copying into the config dir.
-* The game entry stub runs: BSS clear, stack setup, heap init, then it calls
-  the engine init.
+* The game's boot code runs: the stack is set up by the launcher and the
+  boot code's calls into the IPL3 are routed to native stubs
+  (`src/mace_patches.cpp`).
 
 ## Key findings about the ROM
 
@@ -57,6 +64,14 @@ Initializing recomp heap at offset 0x01000000 with size 0x1F000000
   has to be passed sign-extended (`(gpr)(int64_t)(int32_t)0x80001000`).
 
 ## Open problems / next steps
+
+0. **Memory mapped I/O for the boot code.** The boot code programs the PI
+   (cart DMA), VI, AI and EXI registers directly. The recomp runtime only
+   emulates the SDK level entry points, so either the boot code's hardware
+   functions have to be reimplemented natively (like the IPL3 stubs) or the
+   runtime needs a small MMIO layer. Until then the game waits for a cart DMA
+   that never completes and the window stays black.
+
 
 1. **Resolve the two-build mix.** The port has to pick one of the two builds
    and remap the whole ROM (or find the original ROM revision the game

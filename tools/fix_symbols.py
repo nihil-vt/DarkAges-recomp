@@ -234,17 +234,24 @@ def fill_gaps(sections, rom, only=None):
 
 
 def dedup(sections):
-    """Remove duplicate and overlapping functions."""
+    """Remove duplicate functions and fix up overlapping ones.
+
+    Overlaps are resolved by truncating the earlier function instead of
+    dropping it, so that every function start stays reachable.
+    """
     for sec in sections:
         seen = set()
         unique = []
         for f in sorted(sec.funcs, key=lambda f: f[1]):
             if f[0] in seen:
                 continue
-            if unique and f[1] < unique[-1][1] + unique[-1][2]:
-                # Overlaps the previous function: skip it.
-                continue
             seen.add(f[0])
+            if unique and f[1] < unique[-1][1] + unique[-1][2]:
+                # Overlaps the previous function: truncate that one.
+                overlap = unique[-1][1] + unique[-1][2] - f[1]
+                unique[-1][2] -= overlap
+                if unique[-1][2] == 0:
+                    unique.pop()
             unique.append(f)
         sec.funcs = unique
 
@@ -361,7 +368,7 @@ def main():
                 print(f"round {i}: added {added} functions for call targets")
                 if apply:
                     write(sym_path, sections)
-            n = fill_gaps(sections, rom)
+            n = fill_gaps(sections, rom, only=("boot",))
             if n:
                 print(f"round {i}: filled {n} gap functions")
                 if apply:
@@ -379,9 +386,7 @@ def main():
             targets.add((m.group(1), int(m.group(2), 16)))
         for m in UNHANDLED_RE.finditer(out):
             targets.add((None, int(m.group(1), 16)))
-        if rc == 0:
-            print(f"recomp succeeded after {i} fix rounds")
-            return 0
+        recompiled_ok = rc == 0
         # Functions that cannot be recompiled statically get stubbed.
         new_stubs = []
         merged_cases = 0
@@ -425,7 +430,7 @@ def main():
             m = re.search(r"Error in recompiling (\S+?),", out)
             if m and m.group(1) not in stubs and m.group(1) not in new_stubs:
                 new_stubs.append(m.group(1))
-        if not targets and not new_stubs:
+        if not targets and not new_stubs and not recompiled_ok:
             print("recomp failed with no fixable branch targets:")
             print("\n".join(out.splitlines()[-25:]))
             return 1
@@ -455,6 +460,9 @@ def main():
             stubs += new_stubs
             print(f"round {i}: stubbing {len(new_stubs)} functions: {new_stubs}")
         print(f"round {i}: {len(targets)} branch targets, {fixed} fixes applied")
+        if recompiled_ok and fixed == 0:
+            print(f"recomp succeeded after {i} fix rounds")
+            return 0
         if renames:
             stubs = [renames.get(s, s) for s in stubs]
             renames.clear()

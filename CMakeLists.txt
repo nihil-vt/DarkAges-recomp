@@ -38,6 +38,7 @@ add_executable(mace-recomp
     src/main.cpp
     src/mace_rt64.cpp
     src/mace_overlays.cpp
+    src/mace_patches.cpp
 )
 
 target_compile_options(mace-recomp PRIVATE -fno-strict-aliasing)

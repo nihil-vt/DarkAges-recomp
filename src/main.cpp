@@ -35,6 +35,29 @@ namespace n64_button {
 
 extern "C" void recomp_entrypoint(uint8_t* rdram, recomp_context* ctx);
 
+// The address of the game function to start at. Overridable so that the
+// correct entry point can be searched for at runtime.
+uint32_t g_entry_address = 0x80001000;
+
+// Wrapper around the game's entry point: the runtime calls this instead of the
+// recompiled entry function so that the entry point can be changed without
+// recompiling.
+extern "C" void mace_entry(uint8_t* rdram, recomp_context* ctx) {
+    const char* entry_env = getenv("MACE_ENTRY");
+    if (entry_env != nullptr) {
+        g_entry_address = (uint32_t)strtoul(entry_env, nullptr, 0);
+    }
+    fprintf(stderr, "mace: starting at 0x%08X\n", g_entry_address);
+    // The boot code sets up the stack before calling into the game. The
+    // recomp runtime does not run the boot code, so set up the stack here: the
+    // game's stack lives at 0x801614F0, just above its BSS.
+    ctx->r29 = (gpr)(int64_t)(int32_t)0x801614F0;
+    ctx->r30 = (gpr)(int64_t)(int32_t)0x801614F0;
+    ctx->r31 = 0;
+    recomp_func_t* func = get_function((int32_t)g_entry_address);
+    func(rdram, ctx);
+}
+
 namespace {
 
 // XXH3-64 of "Mace - The Dark Age (USA).z64".
@@ -279,6 +302,9 @@ int main(int argc, char** argv) {
     // The recomp runtime keeps the game configuration (including a copy of the
     // ROM) next to the executable.
     std::filesystem::path config_path = std::filesystem::current_path() / "mace-config";
+    if (const char* config_env = getenv("MACE_CONFIG")) {
+        config_path = config_env;
+    }
     std::error_code ec;
     std::filesystem::create_directories(config_path, ec);
     recomp::register_config_path(config_path);
@@ -292,7 +318,7 @@ int main(int argc, char** argv) {
     game.save_type = recomp::SaveType::None;
     game.is_enabled = true;
     game.entrypoint_address = (gpr)(int64_t)(int32_t)MACE_ENTRYPOINT;
-    game.entrypoint = recomp_entrypoint;
+    game.entrypoint = mace_entry;
     recomp::register_game(game);
 
     // Copy the user supplied ROM into the config directory (this also
