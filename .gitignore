@@ -17,3 +17,7 @@ tools/N64Recomp/
 tools/Zelda64Recomp/
 tools/RT64/
 .cache/
+
+# Vendored third-party sources (cloned, not part of this repo)
+tools/N64ModernRuntime/
+runtime/

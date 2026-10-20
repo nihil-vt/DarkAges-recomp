@@ -1,0 +1,5 @@
+# Ghidra headless import for Mace N64 ROM (raw MIPS32 BE binary).
+# Run: analyzeHeadless <project_dir> Mace -import <rom> -loader BinaryLoader \
+#        -loader-baseAddr 0x80000000 -processor MIPS:BE:32:default \
+#        -cspec default -postScript tools/ghidra_export.py config/symbols_g.toml
+# Then merge/compare with capstone symscan output.
