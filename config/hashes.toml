@@ -1,0 +1,9 @@
+# Known-good ROM hashes for Mace: The Dark Ages (N64).
+# BYO-ROM: launcher refuses dumps not listed here.
+
+[[rom]]
+name = "Mace: The Dark Ages (USA)"
+sha1 = "05d82a2c73ac536180b68137dbb9972a9e8e883e"
+md5  = "39a2bca1c17cd4cf1a9f3ae2b725b5c6"
+crc64 = "PENDING"  # fill after crc64 tool written
+size = 12582912

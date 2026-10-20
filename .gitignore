@@ -1,0 +1,19 @@
+# ROMs and extracted assets — never commit
+roms/
+data/
+*.z64
+*.n64
+*.v64
+*.rom
+
+# Build output
+build/
+generated/
+*.o
+*.obj
+
+# Tooling
+tools/N64Recomp/
+tools/Zelda64Recomp/
+tools/RT64/
+.cache/
