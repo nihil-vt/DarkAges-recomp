@@ -3,20 +3,22 @@
 Static recompilation of *Mace: The Dark Age* (N64, USA) using N64Recomp +
 the N64 modern runtime (librecomp / ultramodern) with the RT64 renderer.
 
-## Status: the game boots and runs, but the screen stays black
+## Status: the game boots and runs, but the screen stays black (threading blocker)
 
 ```
-$ MACE_ENTRY=0x80000400 ./build/mace-recomp "roms/Mace - The Dark Age (USA).z64"
+$ MACE_HEADLESS=1 ./build/mace-recomp "roms/Mace - The Dark Age (USA).z64"
+[mace] loaded 12582912 bytes of ROM for DMA emulation
+[mace] task table initialized
+[mace] SP memory initialized with 8388608 bytes of ROM
 mace: starting at 0x80000400
-Device Name: NVIDIA GeForce RTX 3060      <- RT64 / Vulkan comes up
-Initializing recomp heap at offset 0x01000000 with size 0x3F000000
+[trace] enter func_80000400
+...
+(timeout after 300s, no crash)
 ```
 
-The cart's boot code runs (it is recompiled and its IPL3 calls are stubbed)
-and the game does not crash, but nothing is displayed: the game's boot code
-drives the PI/VI/EXI hardware registers directly and the recomp runtime has
-no memory mapped I/O, so the game waits forever for a cart DMA that never
-happens.
+Phase 1 and Phase 2 are complete: the game's boot sequence runs, the message queues
+work, the task table is initialized, and tasks are created. The main loop runs
+continuously without segfaulting.
 
 ## What works
 
@@ -38,18 +40,67 @@ happens.
 
 * The code section is `0x1000..0x7D600` (file offsets); `0x7D600` onwards is
   data (strings, the custom VFS table at `0x8B978`, `.rom` blobs).
-* **The ROM mixes code from two builds.** A small set of functions (the entry
-  stub at file `0x1000`, the engine init at file `0x6CB64` and 24 switch
-  statements) addresses everything `0xC00` bytes lower than the file layout,
-  e.g. the entry stub jumps to `0x8006BF64` while the function it really
-  wants sits at file offset `0x6CB64`. The other 99% of the `jal` targets
-  match the file layout exactly, so the two builds are interleaved in the
-  file and cannot both be mapped into the recomp's address space.
-  * Consequence: the entry jump is patched at recompile time
-    (`mace.toml`), and the affected switch statements are stubbed.
-  * Consequence: the game's init calls a function at `0x8000095C` that in the
-    file is the middle of the boot section's IPL3/PI probe, so the game
-    allocates from a non-existent function and crashes with a null pointer.
+* **There is no two-build mix; the mapping was wrong.** The IPL3 DMAs cart
+  `0x1000` to RDRAM physical `0x400`, i.e. kseg0 `0x80000400`, so the code
+  section is `vram = file + 0x7FFFF400`, not `file + 0x80000000`. Under the
+  correct mapping the entry stub's jump target `0x8006BF64` is file `0x6CB64`,
+  a real function prologue (`addiu sp,sp,-0x88`). Checked over the 4905 `jal`
+  targets in the code section: 2315 land on a `addiu sp` prologue with the
+  `0x80000400` mapping versus 12 with `0x80001000`. The entry patch and the
+  "stubbed switch statements" caused by the old mapping are no longer needed.
+  The entry is now `0x80000400` (`mace.toml`), and `tools/make_rom_elf.py`
+  builds an ELF with this mapping for analysis.
+* `0x8000095C` is a heap allocator and `0x800008C8` is memset, not a PI probe.
+  The boot code (`0x80000400`) clears BSS, sets `sp = 0x801614F0` and
+  `jr`s to the game's bootstrap `0x8006BF64`. That bootstrap calls the OS
+  (`osCreateThread`/`osStartThread` in the real game), and the scheduler never
+  returns. In the recomp it returns, so the game's main thread never runs and
+  the window stays black.
+* Done: the game's `osCreateThread` (`0x80073880`) and `osStartThread`
+  (`0x800739D0`) are renamed in `config/symbols.toml`, so the recompiler
+  emits the native `osCreateThread_recomp`/`osStartThread_recomp`. Thread
+  creation works (entry `0x800666A0`, id 1). Do NOT add them to `ignored`:
+  the recompiler already treats them as reimplemented, and listing them there
+  makes N64Recomp exit with "set as ignored ... does not exist".
+* Task table: `0x8007E760`, stride `0x1D0`, key at `+4`, link at `+0x1D4`,
+  size at `+0xC`, stack base at `+0x14`. `0x8006A010` allocates the stack bases.
+  `0x8005CFD8` looks a key up by walking the links. The game's main thread is
+  `0x800666A0`, which creates tasks 6 and 7 and starts them with `0x8005D024`.
+* Fixed this round (all in the build pipeline, not game logic):
+  1. **Fall-through between split functions was dropped.** Ghidra splits some
+     functions at a point where the code simply continues, so `0x8005D024`
+     never reached its `osStartThread` call. `tools/N64Recomp` now emits a tail
+     call to the next function when a function ends without a jump. Source is
+     saved in `tools/patches/N64Recomp-local.patch`; rebuild with
+     `cmake --build tools/N64Recomp/build --target N64RecompCLI`.
+  2. **Bad symbol splits** in `config/symbols.toml`: `0x80066660` swallowed the
+     thread entry `0x800666A0` (split); `0x8006570C` and `0x80065938` were one
+     function (merged); `0x80065FB8` had no symbol (added, merged with
+     `0x800660F0`). Added functions must start after a `jr ra` and must not end
+     in the middle of a branch target: `N64Recomp` reports these as
+     "Unhandled branch" or "Error in recompiling".
+  3. **`__osRunningThread` (`0x80081BD0`)** is not set by the native scheduler.
+     The game's `osGetThreadPri(NULL)` reads it, so `mace_thread_start` in
+     `src/main.cpp` writes `ultramodern::this_thread()` there at each thread start.
+* Root cause of the `0x8010CAA0` crash (found): `func_80070CE4` was split by
+  Ghidra into ten fragments. Its `addiu sp,-0x30` prologue was never undone,
+  so every later call in `func_8006570C` ran with `sp` 0x108 too low and its
+  stack slots (`0x120`..`0x138`) were written to the wrong frame. Merging the
+  cluster (`0x80070CE4` size `0x104`, ten fragments removed) fixes it.
+* Current blocker (after that merge): `func_80070CE4` is called with a NULL
+  structure pointer from `func_8001D40C`, so an asset/data load returns nothing.
+  Likely the PI DMA path (Phase 3). Next step: trace `func_8001D40C` and its
+  caller.
+* `tools/merge_fragments.py` generalises the merge but does not converge yet: each
+  pass exposes another branch into the middle of a function (boot section, and
+  stubbed `func_80001DD4`). Run it report-only; do not apply it blindly.
+* Old blocker (now resolved): task 6 (`0x80065FB8`) runs and reaches `0x80070B40`, which
+  loads a struct from `0x8010CAA0` and segfaults. That struct is probably set by
+  init code that is not running correctly yet. Next step: find who writes
+  `0x8010CAA0` and why it is still junk.
+* Diagnostics: `src/main.cpp` dumps the task table after boot. The earlier
+  OS-queue dump was wrong, because RDRAM words are host-order and it assembled
+  bytes big-endian. Use `MEM_W` for word reads.
 * The game uses a custom VFS: `.rom` blobs (models, textures, sounds) are
   stored in the cart and decompressed by the game's own code at runtime, so
   the recompiler cannot resolve the game's switch tables statically.

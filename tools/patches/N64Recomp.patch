@@ -1,0 +1,374 @@
+diff --git a/include/recomp.h b/include/recomp.h
+index 73f3e73..dc4d90b 100644
+--- a/include/recomp.h
++++ b/include/recomp.h
+@@ -92,24 +92,85 @@ typedef uint64_t gpr;
+ #define SUB32(a, b) \
+     ((gpr)(int32_t)((a) - (b)))
+ 
+-#define MEM_W(offset, reg) \
+-    (*(int32_t*)(rdram + ((((reg) + (offset))) - 0xFFFFFFFF80000000)))
++// SP memory buffer (separate from RDRAM). The game accesses SP memory at
++// 0xA0000000-0xA0800000 during boot for DMA data.
++extern uint8_t* sp_buffer;
++
++// Compute the host pointer for a MIPS virtual address.
++// kseg0 (0x80000000-based) maps to RDRAM. kseg1 (0xA0000000-based) maps to SP
++// memory (separate buffer) because the recomp has no SP DMA hardware.
++// Safe dummy buffer for invalid memory accesses (reads return 0, writes are ignored).
++inline uint8_t* get_safe_mem_buf() {
++    static uint8_t buf[256] = {0};
++    return buf;
++}
++
++// VI register state - maps to 0xFFFFFFFFA4400000-0xFFFFFFFFA440003F
++inline uint8_t* get_mace_vi_regs() {
++    static uint8_t vi_buf[64] = {0};
++    return vi_buf;
++}
++
++// Helper functions for accessing VI registers (defined in main.cpp)
++uint32_t* mace_get_vi_current();
++uint32_t* mace_get_vi_intr();
++
++static inline uint8_t* mips_addr_to_ptr(gpr addr) {
++    // Check for MMIO ranges first - these should NOT map to RDRAM.
++    // VI registers: 0xFFFFFFFFA4400000-0xFFFFFFFFA440003F
++    if (addr >= 0xFFFFFFFFA4400000ULL && addr < 0xFFFFFFFFA4400040ULL) {
++        size_t offset = (size_t)(addr) - (size_t)0xFFFFFFFFA4400000ULL;
++        return get_mace_vi_regs() + offset;
++    }
++    // Check the address range to determine RDRAM vs SP memory.
++    if (addr >= 0xFFFFFFFFA0000000ULL && addr < 0xFFFFFFFFA0800000ULL) {
++        // SP memory: map to sp_buffer.
++        size_t offset = (size_t)(addr) - (size_t)0xFFFFFFFFA0000000ULL;
++        if (offset >= 0x800000) return get_safe_mem_buf();
++        return sp_buffer + offset;
++    }
++    // kseg0: 0xFFFFFFFF80000000-0xFFFFFFFF9FFFFFFF maps to RDRAM (cached)
++    if (addr >= 0xFFFFFFFF80000000ULL && addr <= 0xFFFFFFFF9FFFFFFFULL) {
++        size_t offset = (size_t)(addr) - (size_t)0xFFFFFFFF80000000ULL;
++        if (offset >= 0x1F000000ULL) return get_safe_mem_buf();
++        return (uint8_t*)((size_t)rdram + offset);
++    }
++    // kseg1: 0xFFFFFFFFA0000000-0xFFFFFFFFBFFFFFFF (uncached, maps to same physical as kseg0)
++    if (addr >= 0xFFFFFFFFA0000000ULL && addr <= 0xFFFFFFFFBFFFFFFFULL) {
++        size_t offset = (size_t)(addr) - (size_t)0xFFFFFFFFA0000000ULL;
++        if (offset >= 0x1F000000ULL) return get_safe_mem_buf();
++        return (uint8_t*)((size_t)rdram + offset);
++    }
++    // Any other address is invalid - return safe buffer.
++    return get_safe_mem_buf();
++}
++
++static int mem_w_trace_count = 0;
++#define MEM_W(offset, reg) ({ \
++    int32_t* _ptr = (int32_t*)mips_addr_to_ptr((reg) + (offset)); \
++    if (mem_w_trace_count < 80) { \
++        uint32_t _vram = (uint32_t)((reg) + (offset)); \
++        fprintf(stderr, "[read #%d] vram=0x%08X val=0x%08X\n", mem_w_trace_count, _vram, *_ptr); \
++        mem_w_trace_count++; \
++    } \
++    *_ptr; \
++})
+ 
+ #define MEM_H(offset, reg) \
+-    (*(int16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(int16_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 2))
+ 
+ #define MEM_B(offset, reg) \
+-    (*(int8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(int8_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 3))
+ 
+ #define MEM_HU(offset, reg) \
+-    (*(uint16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(uint16_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 2))
+ 
+ #define MEM_BU(offset, reg) \
+-    (*(uint8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(uint8_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 3))
+ 
+ #define SD(val, offset, reg) { \
+-    *(uint32_t*)(rdram + ((((reg) + (offset) + 4)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 0); \
+-    *(uint32_t*)(rdram + ((((reg) + (offset) + 0)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 32); \
++    *(uint32_t*)mips_addr_to_ptr((reg) + (offset) + 4) = (uint32_t)((gpr)(val) >> 0); \
++    *(uint32_t*)mips_addr_to_ptr((reg) + (offset) + 0) = (uint32_t)((gpr)(val) >> 32); \
+ }
+ 
+ static inline uint64_t load_doubleword(uint8_t* rdram, gpr reg, gpr offset) {
+diff --git a/src/operations.cpp b/src/operations.cpp
+index ca2f095..81f9102 100644
+--- a/src/operations.cpp
++++ b/src/operations.cpp
+@@ -38,6 +38,15 @@ namespace N64Recomp {
+         { InstrId::cpu_ceil_w_d,  { UnaryOpType::CeilWFromD,     Operand::FdU32L,   Operand::FsDouble, true } },
+         { InstrId::cpu_floor_w_s, { UnaryOpType::FloorWFromS,    Operand::FdU32L,   Operand::Fs,       true } },
+         { InstrId::cpu_floor_w_d, { UnaryOpType::FloorWFromD,    Operand::FdU32L,   Operand::FsDouble, true } },
++        // 64-bit variants, used by the ROM's libultra soft-float helpers.
++        { InstrId::cpu_trunc_l_s, { UnaryOpType::TruncateLFromS, Operand::FdU64,    Operand::Fs,       true } },
++        { InstrId::cpu_trunc_l_d, { UnaryOpType::TruncateLFromD, Operand::FdU64,    Operand::FsDouble, true } },
++        { InstrId::cpu_round_l_s, { UnaryOpType::RoundLFromS,    Operand::FdU64,    Operand::Fs,       true } },
++        { InstrId::cpu_round_l_d, { UnaryOpType::RoundLFromD,    Operand::FdU64,    Operand::FsDouble, true } },
++        { InstrId::cpu_ceil_l_s,  { UnaryOpType::CeilLFromS,     Operand::FdU64,    Operand::Fs,       true } },
++        { InstrId::cpu_ceil_l_d,  { UnaryOpType::CeilLFromD,     Operand::FdU64,    Operand::FsDouble, true } },
++        { InstrId::cpu_floor_l_s, { UnaryOpType::FloorLFromS,    Operand::FdU64,    Operand::Fs,       true } },
++        { InstrId::cpu_floor_l_d, { UnaryOpType::FloorLFromD,    Operand::FdU64,    Operand::FsDouble, true } },
+     };
+ 
+     // TODO fix usage of check_nan
+@@ -87,10 +96,10 @@ namespace N64Recomp {
+         { InstrId::cpu_dsra32, { BinaryOpType::Sra64, Operand::Rd, {{ UnaryOpType::ToS64, UnaryOpType::None }, { Operand::Rt, Operand::Sa32 }}} },
+         // Comparisons
+         { InstrId::cpu_slt,   { BinaryOpType::Less, Operand::Rd, {{ UnaryOpType::ToS64, UnaryOpType::ToS64 }, { Operand::Rs, Operand::Rt }}} },
+-        { InstrId::cpu_sltu,  { BinaryOpType::Less, Operand::Rd, {{ UnaryOpType::ToU64, UnaryOpType::ToU64 }, { Operand::Rs, Operand::Rt }}} },
++        { InstrId::cpu_sltu,  { BinaryOpType::Less, Operand::Rd, {{ UnaryOpType::ToU32, UnaryOpType::ToU32 }, { Operand::Rs, Operand::Rt }}} },
+         // Comparisons (immediate)
+         { InstrId::cpu_slti,  { BinaryOpType::Less, Operand::Rt, {{ UnaryOpType::ToS64, UnaryOpType::None }, { Operand::Rs, Operand::ImmS16 }}} },
+-        { InstrId::cpu_sltiu, { BinaryOpType::Less, Operand::Rt, {{ UnaryOpType::ToU64, UnaryOpType::None }, { Operand::Rs, Operand::ImmS16 }}} },
++        { InstrId::cpu_sltiu, { BinaryOpType::Less, Operand::Rt, {{ UnaryOpType::ToU32, UnaryOpType::None }, { Operand::Rs, Operand::ImmS16 }}} },
+         // Float arithmetic
+         { InstrId::cpu_add_s, { BinaryOpType::AddFloat,  Operand::Fd,       {{ UnaryOpType::None, UnaryOpType::None }, { Operand::Fs, Operand::Ft }}, true, true } },
+         { InstrId::cpu_add_d, { BinaryOpType::AddDouble, Operand::FdDouble, {{ UnaryOpType::None, UnaryOpType::None }, { Operand::FsDouble, Operand::FtDouble }}, true, true } },
+diff --git a/src/recompilation.cpp b/src/recompilation.cpp
+index c228433..fae1977 100644
+--- a/src/recompilation.cpp
++++ b/src/recompilation.cpp
+@@ -260,7 +260,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+     };
+ 
+     auto print_func_call_by_address = [&generator, reloc_target_section_offset, has_reloc, reloc_section, reloc_reference_symbol, reloc_type, &context, &func, &static_funcs_out, &needs_link_branch, &print_indent, &process_delay_slot, &print_link_branch]
+-        (uint32_t target_func_vram, bool tail_call = false, bool indent = false)
++        (uint32_t target_func_vram, bool tail_call = false, bool indent = false, bool has_delay_slot = true)
+     {
+         bool call_by_lookup = false;
+         bool call_by_name = false;
+@@ -335,7 +335,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+             if (indent) {
+                 print_indent();
+             }
+-            if (!process_delay_slot(false)) {
++            if (has_delay_slot && !process_delay_slot(false)) {
+                 return false;
+             }
+             print_indent();
+@@ -351,7 +351,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+             else {
+                 generator.emit_function_call(context, matched_func_index);
+             }
+-            print_link_branch();
++            if (has_delay_slot) {
++                print_link_branch();
++            }
+         }
+         return true;
+     };
+@@ -410,10 +412,32 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+ 
+     bool handled = true;
+ 
++    // Loads to $zero are no-ops (result discarded).
++    // Stores from $zero are NOT no-ops - they store value 0 to memory.
++    bool is_zero_rt_load = rt == 0 && (
++        instr_id == InstrId::cpu_lb || instr_id == InstrId::cpu_lbu ||
++        instr_id == InstrId::cpu_lh || instr_id == InstrId::cpu_lhu ||
++        instr_id == InstrId::cpu_lw || instr_id == InstrId::cpu_lwu ||
++        instr_id == InstrId::cpu_lwl || instr_id == InstrId::cpu_lwr ||
++        instr_id == InstrId::cpu_lwc1 ||
++        instr_id == InstrId::cpu_ll || instr_id == InstrId::cpu_lld ||
++        instr_id == InstrId::cpu_ld || instr_id == InstrId::cpu_ldl || instr_id == InstrId::cpu_ldr ||
++        instr_id == InstrId::cpu_ldc1);
++    bool skip_instr = is_zero_rt_load;
++    if (instr_id == InstrId::cpu_lw) {
++        fmt::print(stderr, "DBG: lw rt={} is_zero_rt_load={} skip={}\n", rt, is_zero_rt_load, skip_instr);
++    }
++
++    if (skip_instr) {
++        fmt::print(output_file, "\n");
++    } else {
+     switch (instr_id) {
+     case InstrId::cpu_nop:
+         fmt::print(output_file, "\n");
+         break;
++    // Cache instructions: treat as no-ops (host CPU handles caching).
++    case InstrId::cpu_cache:
++        break;
+     // Cop0 (Limited functionality)
+     case InstrId::cpu_mfc0:
+         {
+@@ -423,9 +447,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 print_indent();
+                 generator.emit_cop0_status_read(rt);
+                 break;
++            case Cop0Reg::COP0_Count:
++                // Count register: return 0 (not needed for recompilation).
++                print_indent();
++                fmt::print(output_file, "ctx->r{} = 0;\n", rt);
++                break;
+             default:
+-                fmt::print(stderr, "Unhandled cop0 register in mfc0: {}\n", (int)reg);
+-                return false;
++                // The IDO crt0 uses registers like $gp/$sp as placeholders for COP0
++                // registers that do not exist (e.g. `mtc0 $zero, $gp, 0`). Those writes
++                // are ignored by the hardware, so ignore them here as well.
++                fmt::print(stderr, "[Warn] Ignoring mfc0 of unsupported cop0 register: {}\n", (int)reg);
++                break;
+             }
+             break;
+         }
+@@ -438,11 +470,26 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 generator.emit_cop0_status_write(rt);
+                 break;
+             default:
+-                fmt::print(stderr, "Unhandled cop0 register in mtc0: {}\n", (int)reg);
+-                return false;
++                fmt::print(stderr, "[Warn] Ignoring mtc0 of unsupported cop0 register: {}\n", (int)reg);
++                break;
+             }
+             break;
+         }
++    case InstrId::cpu_eret:
++        // Exceptions are serviced by the runtime, so recompiled code never
++        // executes an exception return. Emit a return so the dispatcher blob
++        // still compiles; this path is unreachable in the port.
++        fmt::print("[Info] Ignoring eret at 0x{:08X}\n", instr_vram);
++        print_indent();
++        generator.emit_return(context, func_index);
++        break;
++    case InstrId::cpu_tlbr:
++    case InstrId::cpu_tlbwi:
++    case InstrId::cpu_tlbwr:
++    case InstrId::cpu_tlbp:
++        // The runtime owns the address space; TLB maintenance is a no-op.
++        fmt::print("[Info] Ignoring {} at 0x{:08X}\n", instr.getOpcodeName(), instr_vram);
++        break;
+     // Arithmetic
+     case InstrId::cpu_add:
+     case InstrId::cpu_addu:
+@@ -492,7 +539,8 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+             uint32_t branch_target = instr.getBranchVramGeneric();
+             if (branch_target == instr_vram) {
+                 print_indent();
+-                generator.emit_pause_self();
++                // Use custom idle handler instead of pause_self for better compatibility
++                fmt::print(output_file, "mace_idle_handler(rdram);\n");
+             }
+             // Check if the branch is within this function
+             else if (branch_target >= func.vram && branch_target < func_vram_end) {
+@@ -519,8 +567,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 generator.emit_return(context, func_index);
+             }
+             else {
+-                fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
+-                return false;
++                // Hand-written libultra code jumps into the middle of shared code
++                // (common dispatcher/epilogue labels). Treat it as a tail call
++                // into a static function: the recomp context carries all state,
++                // so the callee continues with the same $sp and registers.
++                fmt::print("[Info] Tail call in {} at 0x{:08X} to unlisted 0x{:08X}\n", func.name, instr_vram, branch_target);
++                if (!print_func_call_by_address(branch_target, true)) {
++                    fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
++                    return false;
++                }
++                print_indent();
++                generator.emit_return(context, func_index);
+             }
+         }
+         break;
+@@ -593,6 +650,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+         handled = false;
+         break;
+     }
++    }
+ 
+     InstructionContext instruction_context{};
+     instruction_context.rd = rd;
+@@ -664,8 +722,12 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+         }
+     };
+ 
++    if (skip_instr) {
++        handled = true;
++    }
++
+     auto find_binary_it = binary_ops.find(instr_id);
+-    if (find_binary_it != binary_ops.end()) {
++    if (!handled && find_binary_it != binary_ops.end()) {
+         print_indent();
+         const BinaryOp& op = find_binary_it->second;
+         
+@@ -687,7 +749,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+     }
+ 
+     auto find_unary_it = unary_ops.find(instr_id);
+-    if (find_unary_it != unary_ops.end()) {
++    if (!handled && find_unary_it != unary_ops.end()) {
+         print_indent();
+         const UnaryOp& op = find_unary_it->second;
+         
+@@ -707,7 +769,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+     }
+ 
+     auto find_conditional_branch_it = conditional_branch_ops.find(instr_id);
+-    if (find_conditional_branch_it != conditional_branch_ops.end()) {
++    if (!handled && find_conditional_branch_it != conditional_branch_ops.end()) {
+         print_indent();
+         // TODO combining the branch condition and branch target into one generator call would allow better optimization in the runtime's JIT generator.
+         // This would require splitting into a conditional jump method and conditional function call method.
+@@ -733,7 +795,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+     }
+ 
+     auto find_store_it = store_ops.find(instr_id);
+-    if (find_store_it != store_ops.end()) {
++    if (!handled && find_store_it != store_ops.end()) {
+         print_indent();
+         const StoreOp& op = find_store_it->second;
+ 
+@@ -745,6 +807,15 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+         handled = true;
+     }
+ 
++    if (!handled) {
++        // The cache instruction has no architectural effect on the recompiled code:
++        // the recomp runtime manages its own memory coherency.
++        if (instr_id == rabbitizer::InstrId::UniqueId::cpu_cache) {
++            fmt::print("[Info] Ignoring cache instruction at 0x{:08X}\n", instr_vram);
++            handled = true;
++        }
++    }
++
+     if (!handled) {
+         fmt::print(stderr, "Unhandled instruction: {}\n", instr.getOpcodeName());
+         return false;
+@@ -859,11 +930,31 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+                 generator.emit_label(fmt::format("skip_{}", num_likely_branches));
+                 num_likely_branches++;
+             }
+-            // Mark the next instruction as being in a likely delay slot if the 
++            // Mark the next instruction as being in a likely delay slot if the
+             in_likely_delay_slot = is_branch_likely;
+             // Advance the vram address by the size of one instruction
+             vram += 4;
+         }
++
++        // If the function ends with a call, the "after" label of the delay
++        // slot was never emitted: emit it at the end of the function.
++        if (needs_link_branch) {
++            generator.emit_label(fmt::format("after_{}", num_link_branches));
++        }
++
++        // A function split by the symbol file can end without a jump: it then
++        // falls through into the next function, which must still run.
++        if (instructions.size() >= 2) {
++            const InstrId last_jump = instructions[instructions.size() - 2].getUniqueId();
++            const bool terminal = last_jump == InstrId::cpu_jr || last_jump == InstrId::cpu_j ||
++                last_jump == InstrId::cpu_b || last_jump == InstrId::cpu_syscall || last_jump == InstrId::cpu_break;
++            const auto next_find = context.functions_by_vram.find(func.vram + (uint32_t)(func.words.size() * 4));
++            if (!terminal && next_find != context.functions_by_vram.end() && !next_find->second.empty()) {
++                fmt::print("Fall-through in {} into {}\n", func.name, context.functions[next_find->second[0]].name);
++                generator.emit_function_call(context, next_find->second[0]);
++                generator.emit_return(context, func_index);
++            }
++        }
+     }
+ 
+     // Terminate the function

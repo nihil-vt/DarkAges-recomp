@@ -18,6 +18,15 @@ tools/Zelda64Recomp/
 tools/RT64/
 .cache/
 
+# Downloaded libretro cores (not part of repo)
+cores/
+
+# Runtime-generated
+mace-config/
+system/
+saves/
+
 # Vendored third-party sources (cloned, not part of this repo)
 tools/N64ModernRuntime/
 runtime/
+build-recomp.log

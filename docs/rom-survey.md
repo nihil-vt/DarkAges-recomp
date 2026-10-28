@@ -1,7 +1,7 @@
 # M0/M1 ROM Survey — Mace: The Dark Ages (USA)
 
 ## ROM baseline
-- File: `roms/Mace - The Dark Age (USA).z64` (from Vimm's Lair zip)
+- File: `roms/Mace - The Dark Age (USA).z64`
 - Size: 12,582,912 bytes (96 Mbit)
 - SHA-1: `05d82a2c73ac536180b68137dbb9972a9e8e883e`
 - MD5: `39a2bca1c17cd4cf1a9f3ae2b725b5c6`

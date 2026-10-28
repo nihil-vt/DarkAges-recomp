@@ -1,0 +1,55 @@
+diff --git a/include/recomp.h b/include/recomp.h
+index 73f3e73..744b9c5 100644
+--- a/include/recomp.h
++++ b/include/recomp.h
+@@ -92,24 +92,43 @@ typedef uint64_t gpr;
+ #define SUB32(a, b) \
+     ((gpr)(int32_t)((a) - (b)))
+ 
++// SP memory buffer (separate from RDRAM). The game accesses SP memory at
++// 0xA0000000-0xA0800000 during boot for DMA data.
++extern uint8_t* sp_buffer;
++
++// Compute the host pointer for a MIPS virtual address.
++// kseg0 (0x80000000-based) maps to RDRAM. kseg1 (0xA0000000-based) maps to SP
++// memory (separate buffer) because the recomp has no SP DMA hardware.
++static inline uint8_t* mips_addr_to_ptr(gpr addr) {
++    // Check the address range to determine RDRAM vs SP memory.
++    if ((uint32_t)(addr) >= 0xA0000000u && (uint32_t)(addr) < 0xA0800000u) {
++        // SP memory: map to sp_buffer.
++        size_t offset = (size_t)(addr) - (size_t)0xFFFFFFFFA0000000ULL;
++        return sp_buffer + offset;
++    }
++    // RDRAM (kseg0): map to rdram.
++    size_t offset = (size_t)(addr) - (size_t)0xFFFFFFFF80000000ULL;
++    return (uint8_t*)((size_t)rdram + offset);
++}
++
+ #define MEM_W(offset, reg) \
+-    (*(int32_t*)(rdram + ((((reg) + (offset))) - 0xFFFFFFFF80000000)))
++    (*(int32_t*)(mips_addr_to_ptr((reg) + (offset))))
+ 
+ #define MEM_H(offset, reg) \
+-    (*(int16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(int16_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 2))
+ 
+ #define MEM_B(offset, reg) \
+-    (*(int8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(int8_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 3))
+ 
+ #define MEM_HU(offset, reg) \
+-    (*(uint16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(uint16_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 2))
+ 
+ #define MEM_BU(offset, reg) \
+-    (*(uint8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(uint8_t*)((uint8_t*)mips_addr_to_ptr((reg) + (offset)) ^ 3))
+ 
+ #define SD(val, offset, reg) { \
+-    *(uint32_t*)(rdram + ((((reg) + (offset) + 4)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 0); \
+-    *(uint32_t*)(rdram + ((((reg) + (offset) + 0)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 32); \
++    *(uint32_t*)mips_addr_to_ptr((reg) + (offset) + 4) = (uint32_t)((gpr)(val) >> 0); \
++    *(uint32_t*)mips_addr_to_ptr((reg) + (offset) + 0) = (uint32_t)((gpr)(val) >> 32); \
+ }
+ 
+ static inline uint64_t load_doubleword(uint8_t* rdram, gpr reg, gpr offset) {

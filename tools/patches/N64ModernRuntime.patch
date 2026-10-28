@@ -1,0 +1,130 @@
+diff --git a/N64Recomp b/N64Recomp
+--- a/N64Recomp
++++ b/N64Recomp
+@@ -1 +1 @@
+-Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253
++Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253-dirty
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 850689d..c6249a0 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -415,7 +415,16 @@ extern "C" void osGetMemSize_recomp(uint8_t * rdram, recomp_context * ctx) {
+ }
+ 
+ enum class StatusReg {
+-    FR = 0x04000000,
++    FR  = 0x04000000,
++    BEV = 0x20000000,
++    IE  = 0x00000001,
++    EXL = 0x00000002,
++    ERL = 0x00000004,
++    IM  = 0x0000FF00,
++    KSU = 0x00000018,
++    UX  = 0x00000020,
++    SX  = 0x00000040,
++    KX  = 0x00000080,
+ };
+ 
+ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
+@@ -441,12 +450,21 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
+         // Remove the FR bit from the changed bits as it's been handled
+         changed &= ~(uint32_t)StatusReg::FR;
+     }
+-
+-    // If any other bits were changed, assert false as they're not handled currently
++    // Ignore the BEV bit (boot exception vector); the game toggles it during init.
++    changed &= ~(uint32_t)StatusReg::BEV;
++    // Ignore interrupt and mode bits - not needed for recompilation.
++    changed &= ~((uint32_t)StatusReg::IE);
++    changed &= ~((uint32_t)StatusReg::EXL);
++    changed &= ~((uint32_t)StatusReg::ERL);
++    changed &= ~((uint32_t)StatusReg::IM);
++    changed &= ~((uint32_t)StatusReg::KSU);
++    changed &= ~((uint32_t)StatusReg::UX);
++    changed &= ~((uint32_t)StatusReg::SX);
++    changed &= ~((uint32_t)StatusReg::KX);
++
++    // If any other bits were changed, just log and continue (don't crash).
+     if (changed) {
+-        printf("Unhandled status register bits changed: 0x%08X\n", changed);
+-        assert(false);
+-        exit(EXIT_FAILURE);
++        printf("[cop0] Unhandled status register bits changed: 0x%08X (full value: 0x%08X)\n", changed, new_sr);
+     }
+     
+     // Update the status register in the context
+diff --git a/librecomp/src/sp.cpp b/librecomp/src/sp.cpp
+index ae0f44f..25e1d64 100644
+--- a/librecomp/src/sp.cpp
++++ b/librecomp/src/sp.cpp
+@@ -10,12 +10,11 @@ extern "C" void osSpTaskLoad_recomp(uint8_t* rdram, recomp_context* ctx) {
+ bool dump_frame = false;
+ 
+ extern "C" void osSpTaskStartGo_recomp(uint8_t* rdram, recomp_context* ctx) {
+-    //printf("[sp] osSpTaskStartGo(0x%08X)\n", (uint32_t)ctx->r4);
+     OSTask* task = TO_PTR(OSTask, ctx->r4);
+     if (task->t.type == M_GFXTASK) {
+-        //printf("[sp] Gfx task: %08X\n", (uint32_t)ctx->r4);
++        fprintf(stderr, "[rsp] gfx task data_ptr=%08X data_size=%d\n", task->t.data_ptr, task->t.data_size);
+     } else if (task->t.type == M_AUDTASK) {
+-        //printf("[sp] Audio task: %08X\n", (uint32_t)ctx->r4);
++        fprintf(stderr, "[rsp] audio task\n");
+     }
+     // For debugging
+     if (dump_frame) {
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 46aea61..f8936a3 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -79,6 +79,7 @@ void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
+ 
+ // Thread scheduling.
+ void check_running_queue(RDRAM_ARG1);
++void set_custom_idle_callback(void (*cb)(uint8_t* rdram));
+ void run_next_thread_and_wait(RDRAM_ARG1);
+ void resume_thread_and_wait(RDRAM_ARG OSThread* t);
+ void schedule_running_thread(RDRAM_ARG PTR(OSThread) t);
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 17d7a47..b24316e 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -174,6 +174,9 @@ extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 ret
+     next_state->mq = mq_;
+     next_state->msg = msg;
+     next_state->retrace_count = retrace_count;
++    if (mq_ != 0) {
++        fprintf(stderr, "[vi] osViSetEvent: mq=%08X msg=%d retrace_count=%d\n", (uint32_t)(uintptr_t)mq_, (int)(uintptr_t)msg, retrace_count);
++    }
+ }
+ 
+ uint64_t total_vis = 0;
+diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
+index a22f747..b1a8298 100644
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -1,5 +1,12 @@
+ #include "ultramodern/ultramodern.hpp"
+ 
++// Custom idle callback - called from pause_self to run game-specific work.
++static void (*custom_idle_cb)(uint8_t* rdram) = nullptr;
++
++void ultramodern::set_custom_idle_callback(void (*cb)(uint8_t* rdram)) {
++    custom_idle_cb = cb;
++}
++
+ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+     debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
+     thread_queue_insert(PASS_RDRAM running_queue, t_);
+@@ -31,8 +38,11 @@ void ultramodern::check_running_queue(RDRAM_ARG1) {
+ 
+ extern "C" void pause_self(RDRAM_ARG1) {
+     while (true) {
+-        // Wait until an external message arrives, then allow the next thread to run.
+         ultramodern::wait_for_external_message(PASS_RDRAM1);
++        // Run custom idle work if registered
++        if (custom_idle_cb != nullptr) {
++            custom_idle_cb(PASS_RDRAM1);
++        }
+         ultramodern::check_running_queue(PASS_RDRAM1);
+     }
+ }

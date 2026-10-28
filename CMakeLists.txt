@@ -41,7 +41,7 @@ add_executable(mace-recomp
     src/mace_patches.cpp
 )
 
-target_compile_options(mace-recomp PRIVATE -fno-strict-aliasing)
+target_link_options(mace-recomp PRIVATE -Wl,--allow-multiple-definition -Wl,-z,muldefs)
 
 target_include_directories(mace-recomp PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -63,3 +63,16 @@ target_link_libraries(mace-recomp PRIVATE
     rt64
     SDL2::SDL2
 )
+
+# --- Libretro frontend (Path C: emulation wrapper) ---
+add_executable(mace-libretro
+    src/mace_libretro.cpp
+)
+target_include_directories(mace-libretro PRIVATE
+    ${CMAKE_SOURCE_DIR}/thirdparty
+)
+find_package(OpenGL REQUIRED)
+target_link_libraries(mace-libretro PRIVATE SDL2::SDL2 OpenGL::GL)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(mace-libretro PRIVATE dl)
+endif()
