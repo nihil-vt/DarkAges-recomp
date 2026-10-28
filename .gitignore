@@ -21,10 +21,14 @@ tools/RT64/
 # Downloaded libretro cores (not part of repo)
 cores/
 
-# Runtime-generated
+# Runtime/generated
 mace-config/
 system/
 saves/
+Mupen64plus/
+__pycache__/
+*.bak
+*.pyc
 
 # Vendored third-party sources (cloned, not part of this repo)
 tools/N64ModernRuntime/
